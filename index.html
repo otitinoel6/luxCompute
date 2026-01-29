@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LUXCOMPUTE | A2A MARKETPLACE</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.ethers.io/lib/ethers-5.2.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #050505;
+            --panel: #0a0a0a;
+            --border: #333;
+            --text: #ccc;
+            --alert: #ff3333;
+            --safe: #00ff00;
+            --accent: #00f3ff;
+        }
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: var(--bg);
+            color: var(--text);
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+            /* Background Image configured here */
+            background-image: url('/background.png');
+        }
+        .box {
+            background: rgba(10, 10, 10, 0.95);
+            border: 1px solid var(--border);
+        }
+        .border-r { border-right: 1px solid var(--border); }
+        .border-b { border-bottom: 1px solid var(--border); }
+        .text-terminal { text-transform: uppercase; letter-spacing: 1px; }
+        .btn-sys {
+            border: 1px solid var(--text);
+            color: var(--text);
+            background: transparent;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .btn-sys:hover { background: var(--text); color: black; }
+        .btn-danger { border-color: var(--alert); color: var(--alert); }
+        .btn-danger:hover { background: var(--alert); color: white; }
+        
+        /* Military Scanlines Effect */
+        .scanlines {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2));
+            background-size: 100% 4px; pointer-events: none; z-index: 50;
+        }
+    </style>
+</head>
+<body>
+    <div class="scanlines"></div>
+
+    <!-- LOGIN SCREEN -->
+    <div id="login" class="h-screen flex flex-col items-center justify-center relative z-10">
+        <div class="box p-10 w-96 text-center border-l-4 border-l-green-600">
+            <!-- Logo Image -->
+            <img src="/logo.png" class="h-20 mx-auto mb-6 opacity-70 grayscale">
+            <h1 class="text-2xl font-bold mb-8 tracking-widest">LUX<span class="text-white">COMPUTE</span> A2A</h1>
+            <button onclick="connect()" class="btn-sys w-full py-4 text-xl font-bold">AUTHENTICATE WALLET</button>
+            <p class="mt-4 text-xs text-gray-600">SECURE CONNECTION // AUTHORIZED PERSONNEL ONLY</p>
+        </div>
+    </div>
+
+    <!-- MAIN DASHBOARD (Hidden by default) -->
+    <div id="term" class="hidden min-h-screen relative z-10 flex flex-col">
+        <!-- Header Bar -->
+        <div class="h-16 box flex items-center justify-between px-6 border-b-2 border-b-gray-700">
+            <div class="flex items-center gap-4">
+                <!-- Logo Header -->
+                <img src="/logo.png" class="h-8 opacity-50">
+                <div>
+                    <span class="text-xs text-gray-500">SYSTEM: ONLINE</span><br>
+                    <span class="text-sm font-bold">PEER-TO-PEER NODE</span>
+                </div>
+            </div>
+            <div class="text-right">
+                <span class="text-xs text-gray-500">IDENTITY</span><br>
+                <span class="text-sm font-mono text-green-500" id="wallet-addr">CONNECTING...</span>
+            </div>
+        </div>
+
+        <div class="flex-1 p-4 grid grid-cols-12 gap-4 overflow-hidden">
+            <!-- Left Column: User Info -->
+            <div class="col-span-3 box p-4 flex flex-col gap-4">
+                <div>
+                    <span class="text-xs text-gray-500">AVAILABLE CREDITS (WEI)</span>
+                    <span class="block text-3xl font-bold text-white" id="bal">0</span>
+                </div>
+                <div class="h-px bg-gray-800 my-2"></div>
+                <div class="text-xs text-gray-500 mb-2">DEPOSIT FUNDS</div>
+                <div class="p-2 bg-black border border-gray-800 text-[10px] text-gray-400 font-mono break-all">
+                    0x1b48cf3fd79cc40d87f5b7af536117b653462502
+                </div>
+                <button onclick="refresh()" class="btn-sys w-full py-2 text-xs mt-2">SYNC BALANCE</button>
+            </div>
+
+            <!-- Center Column: Marketplace -->
+            <div class="col-span-6 box flex flex-col">
+                <div class="p-3 bg-gray-900 border-b border-gray-800 text-xs text-gray-500 flex justify-between">
+                    <span>RESOURCE ALLOCATION GRID</span>
+                    <span class="animate-pulse text-green-500">LIVE FEED</span>
+                </div>
+                <div class="flex-1 overflow-y-auto p-2 grid grid-cols-2 gap-3" id="market-grid">
+                    <!-- Providers injected via JS -->
+                </div>
+            </div>
+
+            <!-- Right Column: Logs -->
+            <div class="col-span-3 box flex flex-col">
+                <div class="p-3 bg-gray-900 border-b border-gray-800 text-xs text-gray-500">A2A ACTIVITY LOG</div>
+                <div class="flex-1 overflow-y-auto p-2 font-mono text-xs text-gray-400 space-y-2" id="logs"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADMIN SURVEILLANCE (Hidden by default) -->
+    <div id="admin" class="hidden fixed inset-0 bg-black z-50 p-4 flex flex-col">
+        <div class="flex justify-between items-center border-b border-red-900 pb-4 mb-4">
+            <h1 class="text-xl font-bold text-red-500">SURVEILLANCE // A2A TRANSACTIONS</h1>
+            <button onclick="closeAdmin()" class="text-xs text-gray-600 hover:text-white">[ CLOSE ]</button>
+        </div>
+        <div class="grid grid-cols-3 gap-4 mb-4">
+            <div class="box p-4"><span class="text-xs text-gray-500">AGENTS</span><div class="text-xl" id="adm-agents">0</div></div>
+            <div class="box p-4"><span class="text-xs text-gray-500">NODES</span><div class="text-xl" id="adm-nodes">0</div></div>
+            <div class="box p-4"><span class="text-xs text-gray-500">TOTAL FEES (WEI)</span><div class="text-xl" id="adm-rev">0</div></div>
+        </div>
+        <div class="box flex-1 overflow-y-auto p-4 font-mono text-xs">
+            <table class="w-full text-left text-gray-400">
+                <thead class="text-gray-600 border-b border-gray-800"><tr><th class="pb-2">TIME</th><th>FROM</th><th>TO</th><th>FEE</th></tr></thead>
+                <tbody id="adm-tx-list"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Secret Trigger -->
+    <div onclick="loginAdmin()" style="position:fixed; bottom:5px; right:5px; width:8px; height:8px; background:#222; cursor:pointer; border:1px solid #444;"></div>
+
+    <script>
+        let wallet = null;
+
+        // --- AUTHENTICATION ---
+        async function connect() {
+            if(window.ethereum) {
+                const acc = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                wallet = acc[0];
+                document.getElementById('wallet-addr').innerText = wallet.substring(0,6)+"..."+wallet.substring(38);
+                document.getElementById('login').classList.add('hidden');
+                document.getElementById('term').classList.remove('hidden');
+                refresh();
+                loadMarketplace();
+            } else {
+                alert("NO INTERFACE DETECTED. INSTALL METAMASK.");
+            }
+        }
+
+        // --- USER FUNCTIONS ---
+        async function refresh() {
+            try {
+                const res = await fetch('/api/balance?addr=' + wallet);
+                const d = await res.json();
+                document.getElementById('bal').innerText = d.balance || 0;
+            } catch(e) { console.error(e); }
+        }
+
+        async function loadMarketplace() {
+            try {
+                const res = await fetch('/api/providers');
+                const list = await res.json();
+                const grid = document.getElementById('market-grid');
+                grid.innerHTML = "";
+                list.forEach(p => {
+                    grid.innerHTML += `
+                        <div class="box p-4 border hover:border-green-500 transition cursor-pointer group">
+                            <div class="flex justify-between items-start mb-2">
+                                <span class="text-xs font-bold text-green-500">${p.gpu}</span>
+                                <span class="text-[10px] text-gray-500 bg-black px-1">${p.id}</span>
+                            </div>
+                            <div class="text-xs text-gray-400 mb-4">OWNER: ${p.wallet.substring(0,10)}...</div>
+                            <div class="flex justify-between items-center">
+                                <span class="text-xs font-mono text-white">${p.price} WEI</span>
+                                <button onclick="rent('${p.id}', '${p.wallet}', ${p.price})" class="btn-sys text-[10px] py-1 px-2 group-hover:bg-green-500 group-hover:text-black">RENT</button>
+                            </div>
+                        </div>`;
+                });
+            } catch(e) { console.error(e); }
+        }
+
+        async function rent(pid, pw, price) {
+            if(!confirm("CONFIRM RENTAL? COST: " + price + " WEI")) return;
+            try {
+                const res = await fetch('/api/rent', {
+                    method: 'POST',
+                    body: JSON.stringify({ renter_wallet: wallet, provider_id: pid, provider_wallet: pw })
+                });
+                const data = await res.json();
+                if(data.status === "rented") {
+                    log("RENTED " + pid + " // DEDUCTED " + price + " WEI");
+                    refresh();
+                } else {
+                    alert("ERROR: " + JSON.stringify(data));
+                }
+            } catch(e) { alert("NETWORK ERROR: " + e); }
+        }
+
+        function log(msg) {
+            document.getElementById('logs').innerHTML = '<div class="text-green-500">> ' + msg + '</div>' + document.getElementById('logs').innerHTML;
+        }
+
+        // --- ADMIN FUNCTIONS ---
+        function loginAdmin() {
+            const u = prompt("IDENTITY"); const p = prompt("PASSCODE");
+            // Matches Render Env Vars: otiti / otitixdanni8
+            if(u === "otiti" && p === "otitixdanni8") {
+                document.getElementById('admin').classList.remove('hidden');
+                pollAdmin();
+            } else {
+                alert("ACCESS DENIED");
+            }
+        }
+
+        function closeAdmin() {
+            document.getElementById('admin').classList.add('hidden');
+        }
+
+        async function pollAdmin() {
+            try {
+                // Overview
+                const resOv = await fetch('/api/admin/overview', {headers:{'Authorization':'Basic ' + btoa('otiti:otitixdanni8')}});
+                const d = await resOv.json();
+                document.getElementById('adm-agents').innerText = d.agents;
+                document.getElementById('adm-nodes').innerText = d.nodes;
+                document.getElementById('adm-rev').innerText = d.revenue;
+
+                // Transactions
+                const resTx = await fetch('/api/admin/a2a-tx', {headers:{'Authorization':'Basic ' + btoa('otiti:otitixdanni8')}});
+                const txs = await resTx.json();
+                const tb = document.getElementById('adm-tx-list');
+                tb.innerHTML = "";
+                txs.forEach(t => {
+                    tb.innerHTML += `<tr class="border-b border-gray-800"><td class="py-1">${t.time}</td><td>${t.from.substring(0,8)}...</td><td>${t.to.substring(0,8)}...</td><td class="text-red-500">${t.fee}</td></tr>`;
+                });
+            } catch(e) { console.error(e); }
+            setTimeout(pollAdmin, 3000); // Poll every 3s
+        }
+    </script>
+</body>
+</html>
