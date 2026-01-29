@@ -131,13 +131,13 @@ func seedProviders() {
 func monitorBlockchain() {
     var lastBlock int64 = 0
     for {
-        header, _ := ethclient.HeaderByNumber(context.Background(), nil)
+        header, _ := ethClient.HeaderByNumber(context.Background(), nil)
         if header == nil { time.Sleep(10 * time.Second); continue }
         current := header.Number.Int64()
         if lastBlock == 0 { lastBlock = current - 10 }
         
         for b := lastBlock + 1; b <= current; b++ {
-            block, _ := ethclient.BlockByNumber(context.Background(), big.NewInt(b))
+            block, _ := ethClient.BlockByNumber(context.Background(), big.NewInt(b))
             for _, tx := range block.Transactions() {
                 if tx.To() != nil && tx.To().Hex() == ownerWallet && tx.Value().Sign() > 0 {
                     sender := tx.From().Hex()
@@ -306,11 +306,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
         .btn-sys:hover { background: var(--text); color: black; }
         .btn-danger { border-color: var(--alert); color: var(--alert); }
         .btn-danger:hover { background: var(--alert); color: white; }
-        .scanlines {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2));
-            background-size: 100% 4px; pointer-events: none; z-index: 50;
-        }
+        .scanlines { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2)); background-size: 100% 4px; pointer-events: none; z-index: 50; }
     </style>
 </head>
 <body>
@@ -474,7 +470,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 </html>`
     w.Header().Set("Content-Type", "text/html")
     w.Write([]byte(html))
-}
+
 
 
 
