@@ -61,6 +61,8 @@ func main() {
     http.HandleFunc("/api/providers", getProviders)
     http.HandleFunc("/api/rent", handleRent)
     http.HandleFunc("/api/balance", checkRealBalance)
+    
+    // Admin Routes
     http.HandleFunc("/api/admin/overview", adminAuth(handleAdminOverview))
     http.HandleFunc("/api/admin/a2a-tx", adminAuth(handleA2ATransactions))
 
@@ -139,15 +141,10 @@ func monitorBlockchain() {
             }
             for _, tx := range block.Transactions() {
                 if tx.To() != nil && tx.To().Hex() == ownerWallet && tx.Value().Sign() > 0 {
-                    // FIX: Use Envelope to robustly extract Sender (From) in modern Go-Ethereum
-                    envelope, err := types.NewEnvelope(tx)
-                    if err != nil {
-                        // Skip if transaction is malformed/unsupported
-                        continue
-                    }
-                    sender := envelope.From().Hex()
-                    
+                    // FIX: Direct Signer call + Sprintf for Hex formatting
+                    sender := fmt.Sprintf("%x", tx.Signer())
                     amount := tx.Value()
+                    
                     db.Exec(`INSERT INTO agents (wallet, balance) VALUES ($1, $2) 
                         ON CONFLICT (wallet) DO UPDATE SET balance = agents.balance + $2`, 
                         sender, amount.String())
@@ -160,7 +157,6 @@ func monitorBlockchain() {
     }
 }
 
-// --- A2A API: Get Providers ---
 func getProviders(w http.ResponseWriter, r *http.Request) {
     rows, _ := db.Query("SELECT id, node_id, wallet, gpu_model, status, price_wei FROM providers WHERE status = 'ONLINE'")
     defer rows.Close()
@@ -178,7 +174,6 @@ func getProviders(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(nodes)
 }
 
-// --- A2A API: Rent (Peer to Peer Payment) ---
 func handleRent(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost { return }
     
@@ -283,3 +278,4 @@ func adminAuth(next http.HandlerFunc) http.HandlerFunc {
         next(w, r)
     }
 }
+
