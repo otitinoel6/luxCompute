@@ -12,9 +12,9 @@ import (
     _ "github.com/lib/pq"
     "github.com/ethereum/go-ethereum/core/types"
     "github.com/ethereum/go-ethereum/ethclient"
+    "time"
 )
 
-// --- Configuration ---
 var (
     db          *sql.DB
     dbUrl       = os.Getenv("DATABASE_URL")
@@ -44,29 +44,27 @@ func main() {
     }
     log.Println("A2A INFRASTRUCTURE ONLINE")
 
-    // 3. Schema & Seed
+    // 3. Schema & Seed Data
     initSchema()
     seedProviders()
 
     // 4. Background Watcher
     go monitorBlockchain()
 
-    // 5. Static Assets (Serves index.html automatically)
+    // 5. Static Assets
     fs := http.FileServer(http.Dir("."))
     http.Handle("/", fs)
     http.Handle("/logo.png", fs)
     http.Handle("/background.png", fs)
-    
-    // 6. Public A2A APIs
+
+    // 6. Routes
     http.HandleFunc("/api/providers", getProviders)
     http.HandleFunc("/api/rent", handleRent)
     http.HandleFunc("/api/balance", checkRealBalance)
-    
-    // 7. Admin APIs
     http.HandleFunc("/api/admin/overview", adminAuth(handleAdminOverview))
     http.HandleFunc("/api/admin/a2a-tx", adminAuth(handleA2ATransactions))
 
-    // 8. Start
+    // 7. Start
     port := os.Getenv("PORT")
     if port == "" { port = "8080" }
     log.Printf("A2A MARKETPLACE ACTIVE ON :%s", port)
@@ -125,13 +123,20 @@ func seedProviders() {
 func monitorBlockchain() {
     var lastBlock int64 = 0
     for {
-        header, _ := ethClient.HeaderByNumber(context.Background(), nil)
-        if header == nil { time.Sleep(10 * time.Second); continue }
+        header, err := ethClient.HeaderByNumber(context.Background(), nil)
+        if err != nil {
+            time.Sleep(10 * time.Second)
+            continue
+        }
         current := header.Number.Int64()
         if lastBlock == 0 { lastBlock = current - 10 }
         
         for b := lastBlock + 1; b <= current; b++ {
-            block, _ := ethClient.BlockByNumber(context.Background(), big.NewInt(b))
+            block, err := ethClient.BlockByNumber(context.Background(), big.NewInt(b))
+            if err != nil {
+                log.Printf("Error fetching block %d: %v", b, err)
+                continue
+            }
             for _, tx := range block.Transactions() {
                 if tx.To() != nil && tx.To().Hex() == ownerWallet && tx.Value().Sign() > 0 {
                     sender := tx.From().Hex()
@@ -148,11 +153,10 @@ func monitorBlockchain() {
     }
 }
 
-// --- APIs ---
-
 func getProviders(w http.ResponseWriter, r *http.Request) {
     rows, _ := db.Query("SELECT id, node_id, wallet, gpu_model, status, price_wei FROM providers WHERE status = 'ONLINE'")
     defer rows.Close()
+    
     var nodes []map[string]interface{}
     for rows.Next() {
         var id int
@@ -176,30 +180,41 @@ func handleRent(w http.ResponseWriter, r *http.Request) {
     }
     json.NewDecoder(r.Body).Decode(&req)
 
-    // 1. Check Balance
+    // 1. Check Renter Balance
     var renterBal int64
     db.QueryRow("SELECT balance FROM agents WHERE wallet = $1", req.RenterWallet).Scan(&renterBal)
     if renterBal == 0 { http.Error(w, "INSUFFICIENT CREDITS", 400); return }
 
-    // 2. Get Price
+    // 2. Get Provider Price
     var priceWei int64
     db.QueryRow("SELECT price_wei FROM providers WHERE node_id = $1", req.ProviderID).Scan(&priceWei)
-    if renterBal < priceWei { http.Error(w, "INSUFFICIENT FUNDS FOR GPU", 400); return }
 
-    // 3. Execute Transfer
+    if renterBal < priceWei {
+        http.Error(w, "INSUFFICIENT FUNDS FOR GPU", 400)
+        return
+    }
+
+    // 3. Calculate Fee (1% for Owner)
     feeAmount := big.NewInt(priceWei)
-    feeAmount.Div(feeAmount, big.NewInt(100)) // 1%
+    feeAmount.Div(feeAmount, big.NewInt(100)) // / 100
 
+    // 4. Execute A2A Transfer
     tx, _ := db.Begin()
+    
+    // Deduct from Renter
     tx.Exec("UPDATE agents SET balance = balance - $1 WHERE wallet = $2", priceWei, req.RenterWallet)
     
+    // Pay Provider (Net)
     providerNet := priceWei - feeAmount.Int64()
     tx.Exec(`INSERT INTO agents (wallet, balance) VALUES ($1, $2) 
-        ON CONFLICT (wallet) DO UPDATE SET balance = agents.balance + $2`, req.ProviderWallet, providerNet)
+        ON CONFLICT (wallet) DO UPDATE SET balance = agents.balance + $2`, 
+        req.ProviderWallet, providerNet)
     
+    // Log Transaction
     tx.Exec("INSERT INTO a2a_jobs (from_wallet, to_wallet, fee_wei, amount_wei) VALUES ($1, $2, $3, $4)", 
         req.RenterWallet, req.ProviderWallet, feeAmount.Int64(), priceWei)
     
+    // Log Activity
     tx.Exec("INSERT INTO activity_log (description) VALUES ($1)", 
         fmt.Sprintf("A2A TRANSFER: %s -> %s | FEE: %s Wei", req.RenterWallet, req.ProviderWallet, feeAmount.String()))
     
@@ -224,7 +239,9 @@ func handleAdminOverview(w http.ResponseWriter, r *http.Request) {
     db.QueryRow("SELECT COALESCE(SUM(fee_wei), 0) FROM a2a_jobs").Scan(&totalFeeCollected)
     
     json.NewEncoder(w).Encode(map[string]interface{}{
-        "agents": agents, "nodes": providers, "revenue": totalFeeCollected,
+        "agents": agents,
+        "nodes": providers,
+        "revenue": totalFeeCollected,
     })
 }
 
@@ -255,6 +272,7 @@ func adminAuth(next http.HandlerFunc) http.HandlerFunc {
         next(w, r)
     }
 }
+
 
 
 
