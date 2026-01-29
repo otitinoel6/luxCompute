@@ -8,7 +8,6 @@ import (
     "math/big"
     "net/http"
     "os"
-    "strconv"
     "time"
     _ "github.com/lib/pq"
 )
@@ -431,3 +430,4 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "text/html")
     w.Write([]byte(html))
 }
+
