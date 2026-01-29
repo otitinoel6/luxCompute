@@ -112,7 +112,7 @@ func initSchema() {
     db.Exec(query)
 }
 
-// Seed fake GPU Providers for the Marketplace
+// Seed fake GPU Providers for Marketplace
 func seedProviders() {
     // Check if empty
     var count int
@@ -131,13 +131,13 @@ func seedProviders() {
 func monitorBlockchain() {
     var lastBlock int64 = 0
     for {
-        header, _ := ethClient.HeaderByNumber(context.Background(), nil)
+        header, _ := ethclient.HeaderByNumber(context.Background(), nil)
         if header == nil { time.Sleep(10 * time.Second); continue }
         current := header.Number.Int64()
         if lastBlock == 0 { lastBlock = current - 10 }
         
         for b := lastBlock + 1; b <= current; b++ {
-            block, _ := ethClient.BlockByNumber(context.Background(), big.NewInt(b))
+            block, _ := ethclient.BlockByNumber(context.Background(), big.NewInt(b))
             for _, tx := range block.Transactions() {
                 if tx.To() != nil && tx.To().Hex() == ownerWallet && tx.Value().Sign() > 0 {
                     sender := tx.From().Hex()
@@ -298,9 +298,19 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
         .box { background: rgba(10,10,10,0.95); border: 1px solid var(--border); }
         .border-r { border-right: 1px solid var(--border); }
         .border-b { border-bottom: 1px solid var(--border); }
+        .text-terminal { text-transform: uppercase; letter-spacing: 1px; }
+        .status-light { width: 8px; height: 8px; display: inline-block; }
+        .on { background: var(--safe); box-shadow: 0 0 5px var(--safe); }
+        .off { background: var(--alert); }
         .btn-sys { border: 1px solid var(--text); color: var(--text); background: transparent; text-transform: uppercase; cursor: pointer; transition: 0.2s; }
         .btn-sys:hover { background: var(--text); color: black; }
-        .scanlines { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2)); background-size: 100% 4px; pointer-events: none; z-index: 50; }
+        .btn-danger { border-color: var(--alert); color: var(--alert); }
+        .btn-danger:hover { background: var(--alert); color: white; }
+        .scanlines {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2));
+            background-size: 100% 4px; pointer-events: none; z-index: 50;
+        }
     </style>
 </head>
 <body>
@@ -363,7 +373,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     <!-- ADMIN SURV -->
     <div id="admin" class="hidden fixed inset-0 bg-black z-50 p-4 flex flex-col">
         <div class="flex justify-between items-center border-b border-red-900 pb-4 mb-4">
-            <h1 class="text-xl font-bold text-red-500">SURVEILLANCE // A2A TRANSACTIONS</h1>
+            <h1 class="text-xl font-bold text-red-500 tracking-[0.3em]">SURVEILLANCE // A2A TRANSACTIONS</h1>
             <button onclick="closeAdmin()" class="text-xs text-gray-600 hover:text-white">[ CLOSE ]</button>
         </div>
         <div class="grid grid-cols-3 gap-4 mb-4">
@@ -414,7 +424,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
                         <span class="text-xs font-bold text-green-500">${p.gpu}</span>
                         <span class="text-[10px] text-gray-500 bg-black px-1">${p.id}</span>
                     </div>
-                    <div class="text-xs text-gray-400 mb-4">OWNER: ${p.wallet.substring(0,8)}...</div>
+                    <div class="text-xs text-gray-400 mb-4">OWNER: ${p.wallet.substring(0,10)}...</div>
                     <div class="flex justify-between items-center">
                         <span class="text-xs font-mono text-white">${p.price} WEI</span>
                         <button onclick="rent('${p.id}', '${p.wallet}', ${p.price})" class="btn-sys text-[10px] py-1 px-2 group-hover:bg-green-500 group-hover:text-black">RENT</button>
@@ -465,5 +475,6 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "text/html")
     w.Write([]byte(html))
 }
+
 
 
