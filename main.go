@@ -61,6 +61,8 @@ func main() {
     http.HandleFunc("/api/providers", getProviders)
     http.HandleFunc("/api/rent", handleRent)
     http.HandleFunc("/api/balance", checkRealBalance)
+    
+    // Admin Routes
     http.HandleFunc("/api/admin/overview", adminAuth(handleAdminOverview))
     http.HandleFunc("/api/admin/a2a-tx", adminAuth(handleA2ATransactions))
 
@@ -120,6 +122,7 @@ func seedProviders() {
     }
 }
 
+// FIX: Using AsMessage to avoid tx.From() errors on Go 1.25
 func monitorBlockchain() {
     var lastBlock int64 = 0
     for {
@@ -139,7 +142,10 @@ func monitorBlockchain() {
             }
             for _, tx := range block.Transactions() {
                 if tx.To() != nil && tx.To().Hex() == ownerWallet && tx.Value().Sign() > 0 {
-                    sender := tx.From().Hex()
+                    // Robust Sender Extraction
+                    msg, _ := types.AsMessage(tx, types.AccessList{})
+                    sender := msg.From().Hex()
+                    
                     amount := tx.Value()
                     db.Exec(`INSERT INTO agents (wallet, balance) VALUES ($1, $2) 
                         ON CONFLICT (wallet) DO UPDATE SET balance = agents.balance + $2`, 
@@ -153,6 +159,7 @@ func monitorBlockchain() {
     }
 }
 
+// --- A2A API: Get Providers ---
 func getProviders(w http.ResponseWriter, r *http.Request) {
     rows, _ := db.Query("SELECT id, node_id, wallet, gpu_model, status, price_wei FROM providers WHERE status = 'ONLINE'")
     defer rows.Close()
@@ -170,6 +177,7 @@ func getProviders(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(nodes)
 }
 
+// --- A2A API: Rent (Peer to Peer Payment) ---
 func handleRent(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost { return }
     
@@ -231,6 +239,8 @@ func checkRealBalance(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(map[string]interface{}{"balance": dbBal})
 }
 
+// --- Admin Surveillance ---
+
 func handleAdminOverview(w http.ResponseWriter, r *http.Request) {
     var agents, providers int
     var totalFeeCollected int64
@@ -272,6 +282,7 @@ func adminAuth(next http.HandlerFunc) http.HandlerFunc {
         next(w, r)
     }
 }
+
 
 
 
