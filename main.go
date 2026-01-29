@@ -396,7 +396,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
         function adminLogin() {
             const u = prompt("IDENTITY:");
             const p = prompt("PASSCODE:");
-            if(u === "` + adminUser + `" && p === "` + adminPass + `") {
+            if(u === "otiti" && p === "otitixdanni8") {
                 fetchLogs();
                 document.getElementById('admin-panel').classList.remove('hidden');
             } else {
@@ -411,14 +411,14 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
         async function fetchLogs() {
             try {
                 const res = await fetch('/api/admin/activity', {
-                    headers: { 'Authorization': 'Basic ' + btoa('` + adminUser + `:` + adminPass + `') }
+                    headers: { 'Authorization': 'Basic ' + btoa('otiti:otitixdanni8') }
                 });
                 const logs = await res.json();
                 const div = document.getElementById('admin-logs');
                 div.innerHTML = "";
                 let fees = 0;
                 logs.forEach(l => {
-                    const row = `<div class="mb-1 border-b border-gray-800 pb-1 flex justify-between"><span>[${l.time}] ${l.desc}</span></div>`;
+                    const row = '<div class="mb-1 border-b border-gray-800 pb-1 flex justify-between"><span>[' + l.time + '] ' + l.desc + '</span></div>';
                     div.innerHTML += row;
                     if(l.desc.includes("Fee")) fees++; 
                 });
