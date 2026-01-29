@@ -1,6 +1,7 @@
 package main
 
 import (
+    "context"
     "database/sql"
     "encoding/json"
     "fmt"
@@ -8,61 +9,99 @@ import (
     "math/big"
     "net/http"
     "os"
+    "strconv"
     "time"
     _ "github.com/lib/pq"
+    "github.com/ethereum/go-ethereum/core/types"
+    "github.com/ethereum/go-ethereum/ethclient"
 )
 
-// --- Configuration from Environment ---
+// --- Configuration ---
 var (
     db          *sql.DB
     dbUrl       = os.Getenv("DATABASE_URL")
     adminUser   = os.Getenv("ADMIN_USER")
     adminPass   = os.Getenv("ADMIN_PASS")
-    ownerWallet = os.Getenv("OWNER_WALLET")
-    feeRate     = 0.01 // 1%
+    ownerWallet = os.Getenv("OWNER_WALLET") // Fee destination
+    ethClient   *ethclient.Client
 )
 
 func main() {
-    // Connect to DB
     var err error
+    
+    // 1. Connect DB
     db, err = sql.Open("postgres", dbUrl)
     if err != nil {
-        log.Fatal("Database Connection Error:", err)
+        log.Fatal("DB Connection Error:", err)
     }
     defer db.Close()
-
-    // Ping to ensure connection
     if err = db.Ping(); err != nil {
-        log.Fatal("Database Ping Error:", err)
+        log.Fatal("DB Ping Error:", err)
     }
-    log.Println("System Online: Database Connected.")
 
-    // Initialize Schema
+    // 2. Connect Ethereum
+    ethClient, err = ethclient.Dial("https://cloudflare-eth.com")
+    if err != nil {
+        log.Fatal("Ethereum Connection Error:", err)
+    }
+    log.Println("A2A INFRASTRUCTURE ONLINE")
+
+    // 3. Schema & Seed Data (Providers)
     initSchema()
+    seedProviders()
 
-    // Routes (API + Frontend)
+    // 4. Background Watcher
+    go monitorBlockchain()
+
+    // 5. Static Assets
+    fs := http.FileServer(http.Dir("."))
+    http.Handle("/logo.png", fs)
+    http.Handle("/background.png", fs)
+
+    // 6. Routes
     http.HandleFunc("/", indexHandler)
-    http.HandleFunc("/api/deposit", handleDeposit)
-    http.HandleFunc("/api/createJob", handleCreateJob)
-    http.HandleFunc("/api/admin/activity", adminAuth(handleAdminActivity))
+    
+    // Public A2A APIs
+    http.HandleFunc("/api/providers", getProviders) // Get list of GPUs
+    http.HandleFunc("/api/rent", handleRent)       // Agent pays Provider
+    http.HandleFunc("/api/balance", checkRealBalance)
+    
+    // Admin APIs
+    http.HandleFunc("/api/admin/overview", adminAuth(handleAdminOverview))
+    http.HandleFunc("/api/admin/a2a-tx", adminAuth(handleA2ATransactions)) // Specific A2A logs
 
-    // Start Engine
+    // 7. Start
     port := os.Getenv("PORT")
-    if port == "" {
-        port = "8080"
-    }
-    fmt.Printf("LuxCompute Engine Running on Port %s...\n", port)
+    if port == "" { port = "8080" }
+    log.Printf("A2A MARKETPLACE ACTIVE ON :%s", port)
     log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-// --- Backend Logic ---
+// --- Schema & Logic ---
 
 func initSchema() {
     query := `
     CREATE TABLE IF NOT EXISTS agents (
         id SERIAL PRIMARY KEY,
         wallet TEXT UNIQUE,
-        balance BIGINT DEFAULT 0
+        balance BIGINT DEFAULT 0,
+        banned BOOLEAN DEFAULT FALSE
+    );
+    CREATE TABLE IF NOT EXISTS providers (
+        id SERIAL PRIMARY KEY,
+        wallet TEXT UNIQUE, -- The provider getting paid
+        node_id TEXT,
+        gpu_model TEXT,
+        status TEXT DEFAULT 'online',
+        price_wei BIGINT
+    );
+    CREATE TABLE IF NOT EXISTS a2a_jobs (
+        id SERIAL PRIMARY KEY,
+        from_wallet TEXT, -- Renter
+        to_wallet TEXT,   -- Provider
+        fee_wei BIGINT,   -- Owner's cut
+        amount_wei BIGINT, -- Total paid
+        timestamp TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS activity_log (
         id SERIAL PRIMARY KEY,
@@ -70,359 +109,355 @@ func initSchema() {
         timestamp TIMESTAMP DEFAULT NOW()
     );
     `
-    _, err := db.Exec(query)
-    if err != nil {
-        log.Println("Schema Init Warning:", err)
+    db.Exec(query)
+}
+
+// Seed fake GPU Providers for the Marketplace
+func seedProviders() {
+    // Check if empty
+    var count int
+    db.QueryRow("SELECT COUNT(*) FROM providers").Scan(&count)
+    if count == 0 {
+        log.Println("Seeding A2A GPU Nodes...")
+        db.Exec("INSERT INTO providers (node_id, wallet, gpu_model, status, price_wei) VALUES ($1, $2, $3, $4, $5)",
+            "NODE_ALPHA", "0xProvider1...", "NVIDIA A100", "ONLINE", 10000000000000000)
+        db.Exec("INSERT INTO providers (node_id, wallet, gpu_model, status, price_wei) VALUES ($1, $2, $3, $4, $5)",
+            "NODE_BRAVO", "0xProvider2...", "RTX 3090", "ONLINE", 5000000000000000)
+        db.Exec("INSERT INTO providers (node_id, wallet, gpu_model, status, price_wei) VALUES ($1, $2, $3, $4, $5)",
+            "NODE_CHARLIE", "0xProvider3...", "H100", "ONLINE", 20000000000000000)
     }
 }
 
-func logActivity(desc string) {
-    _, err := db.Exec("INSERT INTO activity_log (description) VALUES ($1)", desc)
-    if err != nil {
-        log.Println("Logging Error:", err)
+func monitorBlockchain() {
+    var lastBlock int64 = 0
+    for {
+        header, _ := ethClient.HeaderByNumber(context.Background(), nil)
+        if header == nil { time.Sleep(10 * time.Second); continue }
+        current := header.Number.Int64()
+        if lastBlock == 0 { lastBlock = current - 10 }
+        
+        for b := lastBlock + 1; b <= current; b++ {
+            block, _ := ethClient.BlockByNumber(context.Background(), big.NewInt(b))
+            for _, tx := range block.Transactions() {
+                if tx.To() != nil && tx.To().Hex() == ownerWallet && tx.Value().Sign() > 0 {
+                    sender := tx.From().Hex()
+                    amount := tx.Value()
+                    db.Exec(`INSERT INTO agents (wallet, balance) VALUES ($1, $2) 
+                        ON CONFLICT (wallet) DO UPDATE SET balance = agents.balance + $2`, 
+                        sender, amount.String())
+                    db.Exec("INSERT INTO activity_log (description) VALUES ($1)", fmt.Sprintf("DEPOSIT: %s credits loaded", sender))
+                }
+            }
+            lastBlock = b
+        }
+        time.Sleep(10 * time.Second)
     }
 }
 
-func handleDeposit(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodPost {
-        return
-    }
-    var req struct{ Wallet string `json:"wallet"` }
-    json.NewDecoder(r.Body).Decode(&req)
-
-    // Add 1 ETH (Mock logic for testing - in real prod, you'd verify on-chain)
-    // 1 ETH = 10^18 Wei
-    depositAmount := big.NewInt(0).Exp(big.NewInt(10), big.NewInt(18), nil)
-
-    _, err := db.Exec(`
-        INSERT INTO agents (wallet, balance) 
-        VALUES ($1, $2) 
-        ON CONFLICT (wallet) 
-        DO UPDATE SET balance = agents.balance + $2
-    `, req.Wallet, depositAmount.String())
-
-    if err != nil {
-        http.Error(w, "DB Error", 500)
-        return
-    }
-
-    logActivity(fmt.Sprintf("DEPOSIT: %s received 1 ETH", req.Wallet))
-    w.WriteHeader(http.StatusOK)
-}
-
-func handleCreateJob(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodPost {
-        return
-    }
-    var req struct{ Wallet string `json:"wallet"` }
-    json.NewDecoder(r.Body).Decode(&req)
-
-    // Cost: 0.01 ETH
-    jobCost := big.NewInt(0).Exp(big.NewInt(10), big.NewInt(16), nil) // 10^16
+// --- A2A API: Get Providers ---
+func getProviders(w http.ResponseWriter, r *http.Request) {
+    rows, _ := db.Query("SELECT id, node_id, wallet, gpu_model, status, price_wei FROM providers WHERE status = 'ONLINE'")
+    defer rows.Close()
     
-    // Check Balance
-    var currentBal int64
-    err := db.QueryRow("SELECT balance FROM agents WHERE wallet = $1", req.Wallet).Scan(&currentBal)
-    if err != nil || currentBal < jobCost.Int64() {
-        http.Error(w, "Insufficient Funds", 400)
+    var nodes []map[string]interface{}
+    for rows.Next() {
+        var id int
+        var node, wallet, gpu, status string
+        var price int64
+        rows.Scan(&id, &node, &wallet, &gpu, &status, &price)
+        nodes = append(nodes, map[string]interface{}{
+            "id": node, "wallet": wallet, "gpu": gpu, "price": price, "status": status,
+        })
+    }
+    json.NewEncoder(w).Encode(nodes)
+}
+
+// --- A2A API: Rent (Peer to Peer Payment) ---
+func handleRent(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost { return }
+    
+    var req struct {
+        RenterWallet  string `json:"renter_wallet"`
+        ProviderID    string `json:"provider_id"`
+        ProviderWallet string `json:"provider_wallet"`
+    }
+    json.NewDecoder(r.Body).Decode(&req)
+
+    // 1. Check Renter Balance
+    var renterBal int64
+    db.QueryRow("SELECT balance FROM agents WHERE wallet = $1", req.RenterWallet).Scan(&renterBal)
+    if renterBal == 0 { http.Error(w, "INSUFFICIENT CREDITS", 400); return }
+
+    // 2. Get Provider Price
+    var priceWei int64
+    db.QueryRow("SELECT price_wei FROM providers WHERE node_id = $1", req.ProviderID).Scan(&priceWei)
+
+    if renterBal < priceWei {
+        http.Error(w, "INSUFFICIENT FUNDS FOR GPU", 400)
         return
     }
 
-    // Calculate Fee
-    feeAmount := new(big.Int)
-    feeAmount.Set(jobCost)
-    feeAmount.Mul(feeAmount, big.NewInt(100)) // x 100 to avoid float precision loss
-    feeAmount.Div(feeAmount, big.NewInt(10000)) // / 10000 to get 1% (1.00%)
+    // 3. Calculate Fee (1% for Owner)
+    feeAmount := big.NewInt(priceWei)
+    feeAmount.Div(feeAmount, big.NewInt(100)) // / 100
 
-    // Deduct Balance
+    // 4. Execute A2A Transfer
+    // Renter pays Price.
+    // Provider gets (Price - Fee).
+    // Owner gets Fee.
+    
     tx, _ := db.Begin()
-    tx.Exec("UPDATE agents SET balance = balance - $1 WHERE wallet = $2", jobCost.Int64(), req.Wallet)
     
-    // Log Fee
-    logActivity(fmt.Sprintf("JOB CREATED: Fee %s Wei deducted to %s", feeAmount.String(), ownerWallet))
+    // Deduct from Renter
+    tx.Exec("UPDATE agents SET balance = balance - $1 WHERE wallet = $2", priceWei, req.RenterWallet)
+    
+    // Pay Provider (Net)
+    providerNet := priceWei - feeAmount.Int64()
+    tx.Exec(`INSERT INTO agents (wallet, balance) VALUES ($1, $2) 
+        ON CONFLICT (wallet) DO UPDATE SET balance = agents.balance + $2`, 
+        req.ProviderWallet, providerNet)
+    
+    // Log Transaction
+    tx.Exec("INSERT INTO a2a_jobs (from_wallet, to_wallet, fee_wei, amount_wei) VALUES ($1, $2, $3, $4)", 
+        req.RenterWallet, req.ProviderWallet, feeAmount.Int64(), priceWei)
+    
+    // Log Activity
+    tx.Exec("INSERT INTO activity_log (description) VALUES ($1)", 
+        fmt.Sprintf("A2A TRANSFER: %s -> %s | FEE: %s Wei", req.RenterWallet, req.ProviderWallet, feeAmount.String()))
     
     tx.Commit()
 
-    logActivity(fmt.Sprintf("JOB EXECUTION STARTED by %s", req.Wallet))
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]string{"status": "success", "fee_wei": feeAmount.String()})
+    json.NewEncoder(w).Encode(map[string]string{"status": "rented", "gpu": req.ProviderID, "paid_to": req.ProviderWallet})
+}
+
+func checkRealBalance(w http.ResponseWriter, r *http.Request) {
+    wallet := r.URL.Query().Get("addr")
+    var dbBal int64
+    db.QueryRow("SELECT balance FROM agents WHERE wallet = $1", wallet).Scan(&dbBal)
+    json.NewEncoder(w).Encode(map[string]interface{}{"balance": dbBal})
+}
+
+// --- Admin Surveillance ---
+
+func handleAdminOverview(w http.ResponseWriter, r *http.Request) {
+    var agents, providers int
+    var totalFeeCollected int64
+    db.QueryRow("SELECT COUNT(*) FROM agents").Scan(&agents)
+    db.QueryRow("SELECT COUNT(*) FROM providers WHERE status='ONLINE'").Scan(&providers)
+    db.QueryRow("SELECT COALESCE(SUM(fee_wei), 0) FROM a2a_jobs").Scan(&totalFeeCollected)
+    
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "agents": agents,
+        "nodes": providers,
+        "revenue": totalFeeCollected,
+    })
+}
+
+func handleA2ATransactions(w http.ResponseWriter, r *http.Request) {
+    rows, _ := db.Query("SELECT from_wallet, to_wallet, fee_wei, amount_wei, timestamp FROM a2a_jobs ORDER BY id DESC LIMIT 20")
+    defer rows.Close()
+    
+    var txs []map[string]interface{}
+    for rows.Next() {
+        var from, to string
+        var fee, amt int64
+        var ts time.Time
+        rows.Scan(&from, &to, &fee, &amt, &ts)
+        txs = append(txs, map[string]interface{}{
+            "from": from, "to": to, "fee": fee, "total": amt, "time": ts.Format("15:04:05"),
+        })
+    }
+    json.NewEncoder(w).Encode(txs)
 }
 
 func adminAuth(next http.HandlerFunc) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         u, p, ok := r.BasicAuth()
         if !ok || u != adminUser || p != adminPass {
-            w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-            http.Error(w, "Unauthorized", 401)
+            http.Error(w, "UNAUTHORIZED", 401)
             return
         }
         next(w, r)
     }
 }
 
-func handleAdminActivity(w http.ResponseWriter, r *http.Request) {
-    rows, _ := db.Query("SELECT description, timestamp FROM activity_log ORDER BY id DESC LIMIT 20")
-    defer rows.Close()
-    
-    var logs []map[string]interface{}
-    for rows.Next() {
-        var desc string
-        var ts time.Time
-        rows.Scan(&desc, &ts)
-        logs = append(logs, map[string]interface{}{
-            "desc": desc,
-            "time": ts.Format("15:04:05"),
-        })
-    }
-    json.NewEncoder(w).Encode(logs)
-}
-
-// --- Frontend (Embedded in Go) ---
+// --- Frontend ---
 func indexHandler(w http.ResponseWriter, r *http.Request) {
     html := `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LuxCompute | Infrastructure</title>
+    <title>LUXCOMPUTE | A2A MARKETPLACE</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.ethers.io/lib/ethers-5.2.umd.min.js"></script>
     <style>
-        :root {
-            --neon-blue: #00f3ff;
-            --neon-purple: #bc13fe;
-            --bg-dark: #050510;
-        }
-        body {
-            font-family: 'Rajdhani', sans-serif;
-            background-color: var(--bg-dark);
-            color: white;
-            overflow-x: hidden;
-        }
-        .font-orbitron { font-family: 'Orbitron', sans-serif; }
-        
-        /* Effects */
-        .watermark {
-            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            width: 500px; opacity: 0.04; pointer-events: none; z-index: 0;
-        }
-        @keyframes scanline {
-            0% { transform: translateY(-100%); } 100% { transform: translateY(100vh); }
-        }
-        .scanline {
-            position: fixed; top: 0; left: 0; width: 100%; height: 2px;
-            background: rgba(0, 243, 255, 0.4);
-            animation: scanline 6s linear infinite; pointer-events: none; z-index: 50;
-        }
-        .glass-panel {
-            background: rgba(16, 20, 30, 0.8);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(0, 243, 255, 0.15);
-            box-shadow: 0 0 30px rgba(0, 243, 255, 0.05);
-        }
-        .btn-neon {
-            background: rgba(0, 243, 255, 0.05); border: 1px solid var(--neon-blue);
-            color: var(--neon-blue); text-transform: uppercase; letter-spacing: 2px;
-            transition: 0.3s; position: relative; overflow: hidden;
-        }
-        .btn-neon:hover {
-            background: var(--neon-blue); color: black; box-shadow: 0 0 20px var(--neon-blue);
-        }
-        .secret-trigger {
-            width: 12px; height: 12px; background: #0f0f0f; border-radius: 50%;
-            position: fixed; bottom: 30px; right: 30px; cursor: pointer;
-            border: 1px solid #333; z-index: 100;
-        }
-        .secret-trigger:hover { background: var(--neon-blue); box-shadow: 0 0 10px var(--neon-blue); }
+        :root { --bg: #050505; --panel: #0a0a0a; --border: #333; --text: #ccc; --alert: #ff3333; --safe: #00ff00; }
+        body { font-family: 'Courier New', Courier, monospace; background: var(--bg); color: var(--text); background-size: cover; background-image: url('/background.png'); }
+        .box { background: rgba(10,10,10,0.95); border: 1px solid var(--border); }
+        .border-r { border-right: 1px solid var(--border); }
+        .border-b { border-bottom: 1px solid var(--border); }
+        .btn-sys { border: 1px solid var(--text); color: var(--text); background: transparent; text-transform: uppercase; cursor: pointer; transition: 0.2s; }
+        .btn-sys:hover { background: var(--text); color: black; }
+        .scanlines { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2)); background-size: 100% 4px; pointer-events: none; z-index: 50; }
     </style>
 </head>
 <body>
-    <div class="scanline"></div>
-    <div class="watermark">
-        <svg viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="40" y="40" width="120" height="120" stroke="white" stroke-width="8"/>
-            <path d="M60 60 L140 60 L140 140 L60 140 Z" fill="black" />
-            <text x="100" y="110" font-family="Orbitron" font-size="40" fill="white" text-anchor="middle">LUX</text>
-        </svg>
+    <div class="scanlines"></div>
+
+    <!-- LOGIN -->
+    <div id="login" class="h-screen flex flex-col items-center justify-center relative z-10">
+        <div class="box p-10 w-96 text-center border-l-4 border-l-green-600">
+            <img src="/logo.png" class="h-20 mx-auto mb-6 opacity-70 grayscale">
+            <h1 class="text-2xl font-bold mb-8 tracking-widest">LUX<span class="text-white">COMPUTE</span> A2A</h1>
+            <button onclick="connect()" class="btn-sys w-full py-4 text-xl font-bold">AUTHENTICATE WALLET</button>
+        </div>
     </div>
 
-    <!-- Phase 1: Welcome -->
-    <div id="welcome-screen" class="flex flex-col items-center justify-center min-h-screen z-10 relative">
-        <h1 class="font-orbitron text-7xl md:text-9xl bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 mb-4" style="filter: drop-shadow(0 0 20px rgba(0,243,255,0.4));">
-            LUX<span class="text-white">COMPUTE</span>
-        </h1>
-        <p class="text-gray-400 text-2xl tracking-[0.3em] uppercase mb-12 font-light">Decentralized Compute Layer</p>
-        <button onclick="enterDashboard()" class="btn-neon px-12 py-4 rounded text-xl font-bold">
-            Initialize Protocol
-        </button>
-    </div>
-
-    <!-- Phase 2: Dashboard -->
-    <div id="dashboard" class="hidden min-h-screen p-6 md:p-12 z-10 relative fade-in">
-        <header class="flex justify-between items-center mb-16 border-b border-gray-800 pb-6">
+    <!-- A2A TERMINAL -->
+    <div id="term" class="hidden min-h-screen relative z-10 flex flex-col">
+        <div class="h-16 box flex items-center justify-between px-6 border-b-2 border-b-gray-700">
             <div class="flex items-center gap-4">
-                <div class="w-10 h-10 bg-cyan-500/10 rounded flex items-center justify-center border border-cyan-500/50">
-                    <div class="w-4 h-4 bg-cyan-400 rounded-full animate-pulse"></div>
-                </div>
-                <span class="font-orbitron text-2xl font-bold tracking-wider">LUX<span class="text-cyan-400">COMPUTE</span></span>
+                <img src="/logo.png" class="h-8 opacity-50">
+                <div><span class="text-xs text-gray-500">SYSTEM: ONLINE</span><br><span class="text-sm font-bold">PEER-TO-PEER NODE</span></div>
             </div>
-            <div class="hidden md:block text-right">
-                <p class="text-xs text-gray-500 uppercase tracking-widest">System Status</p>
-                <p class="text-cyan-400 font-mono">OPERATIONAL</p>
+            <div class="text-right">
+                <span class="text-xs text-gray-500">IDENTITY</span><br>
+                <span class="text-sm font-mono text-green-500" id="wallet-addr">CONNECTING...</span>
             </div>
-        </header>
+        </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <!-- Agent Module -->
-            <div class="glass-panel p-8 rounded-2xl col-span-1">
-                <h2 class="font-orbitron text-xl text-gray-300 mb-6 border-l-4 border-cyan-500 pl-4">WALLET NODE</h2>
-                <div class="mb-8">
-                    <p class="text-gray-500 text-xs uppercase mb-2">Connected Identity</p>
-                    <p class="text-cyan-400 font-mono text-sm truncate bg-black/30 p-2 rounded" id="wallet-display">0x...</p>
+        <div class="flex-1 p-4 grid grid-cols-12 gap-4 overflow-hidden">
+            <!-- Left: User Info -->
+            <div class="col-span-3 box p-4 flex flex-col gap-4">
+                <div>
+                    <span class="text-xs text-gray-500">AVAILABLE CREDITS (WEI)</span>
+                    <span class="block text-3xl font-bold text-white" id="bal">0</span>
                 </div>
-                <div class="mb-8">
-                    <p class="text-gray-500 text-xs uppercase mb-2">Available Credits</p>
-                    <p class="text-4xl font-bold text-white tracking-tighter" id="balance-display">0.0000</p>
-                </div>
-                <div class="space-y-3">
-                    <button onclick="deposit()" class="w-full btn-neon py-3 rounded font-bold">DEPOSIT TEST FUNDS</button>
-                    <button onclick="runJob()" class="w-full btn-neon py-3 rounded font-bold border-purple-500 text-purple-400 hover:bg-purple-500 hover:text-white hover:border-purple-500 hover:shadow-[0_0_15px_#bc13fe]">EXECUTE JOB</button>
-                </div>
+                <div class="h-px bg-gray-800 my-2"></div>
+                <div class="text-xs text-gray-500 mb-2">DEPOSIT FUNDS</div>
+                <div class="p-2 bg-black border border-gray-800 text-[10px] text-gray-400 font-mono break-all">` + ownerWallet + `</div>
+                <button onclick="refresh()" class="btn-sys w-full py-2 text-xs mt-2">SYNC BALANCE</button>
             </div>
 
-            <!-- Metrics -->
-            <div class="glass-panel p-8 rounded-2xl col-span-1 lg:col-span-2">
-                <h2 class="font-orbitron text-xl text-gray-300 mb-6 border-l-4 border-purple-500 pl-4">NETWORK METRICS</h2>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div class="bg-black/40 p-6 rounded-xl border border-gray-800 hover:border-gray-600 transition">
-                        <p class="text-gray-500 text-xs uppercase mb-1">Nodes</p>
-                        <p class="text-3xl font-orbitron text-cyan-400">1,024</p>
-                    </div>
-                    <div class="bg-black/40 p-6 rounded-xl border border-gray-800 hover:border-gray-600 transition">
-                        <p class="text-gray-500 text-xs uppercase mb-1">Latency</p>
-                        <p class="text-3xl font-orbitron text-green-400">12ms</p>
-                    </div>
-                    <div class="bg-black/40 p-6 rounded-xl border border-gray-800 hover:border-gray-600 transition">
-                        <p class="text-gray-500 text-xs uppercase mb-1">Fee</p>
-                        <p class="text-3xl font-orbitron text-purple-400">1.0%</p>
-                    </div>
-                    <div class="bg-black/40 p-6 rounded-xl border border-gray-800 hover:border-gray-600 transition">
-                        <p class="text-gray-500 text-xs uppercase mb-1">Security</p>
-                        <p class="text-3xl font-orbitron text-white">AES-256</p>
-                    </div>
+            <!-- Center: GPU Marketplace -->
+            <div class="col-span-6 box flex flex-col">
+                <div class="p-3 bg-gray-900 border-b border-gray-800 text-xs text-gray-500 flex justify-between">
+                    <span>RESOURCE ALLOCATION GRID</span>
+                    <span class="animate-pulse text-green-500">LIVE FEED</span>
                 </div>
-                <div class="mt-8 p-4 bg-black/20 rounded border border-gray-800">
-                    <p class="text-gray-400 text-xs mb-2">RECENT TRANSACTION HASH</p>
-                    <p class="font-mono text-gray-600 text-xs truncate" id="hash-display">Awaiting request...</p>
+                <div class="flex-1 overflow-y-auto p-2 grid grid-cols-2 gap-3" id="market-grid">
+                    <!-- Providers injected via JS -->
                 </div>
+            </div>
+
+            <!-- Right: Logs -->
+            <div class="col-span-3 box flex flex-col">
+                <div class="p-3 bg-gray-900 border-b border-gray-800 text-xs text-gray-500">A2A ACTIVITY LOG</div>
+                <div class="flex-1 overflow-y-auto p-2 font-mono text-xs text-gray-400 space-y-2" id="logs"></div>
             </div>
         </div>
     </div>
 
-    <!-- Admin Panel -->
-    <div id="admin-panel" class="hidden fixed inset-0 bg-black/95 z-[100] flex items-center justify-center p-8 backdrop-blur-md">
-        <div class="w-full max-w-5xl glass-panel p-1 rounded-xl border border-red-500/30 shadow-[0_0_100px_rgba(220,38,38,0.1)]">
-            <div class="bg-black/50 p-8 rounded-lg">
-                <div class="flex justify-between items-start mb-8 border-b border-gray-800 pb-4">
-                    <div>
-                        <h1 class="font-orbitron text-4xl text-red-500 tracking-widest">SYSTEM OVERRIDE</h1>
-                        <p class="text-gray-500 text-sm mt-1 font-mono">ADMINISTRATIVE ACCESS GRANTED</p>
-                    </div>
-                    <button onclick="closeAdmin()" class="text-gray-500 hover:text-white font-orbitron transition">[CLOSE]</button>
-                </div>
-                
-                <div class="grid grid-cols-3 gap-6 mb-8">
-                    <div class="bg-red-500/10 p-4 rounded border border-red-500/20">
-                        <p class="text-xs text-red-400 uppercase">Fees Collected (Wei)</p>
-                        <p class="text-xl font-bold text-white mt-1" id="fee-counter">0</p>
-                    </div>
-                    <div class="bg-blue-500/10 p-4 rounded border border-blue-500/20">
-                        <p class="text-xs text-blue-400 uppercase">Active Agents</p>
-                        <p class="text-xl font-bold text-white mt-1">Scanning...</p>
-                    </div>
-                    <div class="bg-green-500/10 p-4 rounded border border-green-500/20">
-                        <p class="text-xs text-green-400 uppercase">System Integrity</p>
-                        <p class="text-xl font-bold text-white mt-1">100%</p>
-                    </div>
-                </div>
-
-                <h3 class="text-gray-300 mb-4 font-orbitron">ACTIVITY STREAM</h3>
-                <div id="admin-logs" class="h-64 overflow-y-auto bg-black/80 p-4 font-mono text-xs text-gray-400 border border-gray-700 rounded mb-4">
-                    <p>Connecting to secure database...</p>
-                </div>
-            </div>
+    <!-- ADMIN SURV -->
+    <div id="admin" class="hidden fixed inset-0 bg-black z-50 p-4 flex flex-col">
+        <div class="flex justify-between items-center border-b border-red-900 pb-4 mb-4">
+            <h1 class="text-xl font-bold text-red-500">SURVEILLANCE // A2A TRANSACTIONS</h1>
+            <button onclick="closeAdmin()" class="text-xs text-gray-600 hover:text-white">[ CLOSE ]</button>
+        </div>
+        <div class="grid grid-cols-3 gap-4 mb-4">
+            <div class="box p-4"><span class="text-xs text-gray-500">AGENTS</span><div class="text-xl" id="adm-agents">0</div></div>
+            <div class="box p-4"><span class="text-xs text-gray-500">NODES</span><div class="text-xl" id="adm-nodes">0</div></div>
+            <div class="box p-4"><span class="text-xs text-gray-500">TOTAL FEES (WEI)</span><div class="text-xl" id="adm-rev">0</div></div>
+        </div>
+        <div class="box flex-1 overflow-y-auto p-4 font-mono text-xs">
+            <table class="w-full text-left text-gray-400">
+                <thead class="text-gray-600 border-b border-gray-800"><tr><th class="pb-2">TIME</th><th>FROM</th><th>TO</th><th>FEE</th></tr></thead>
+                <tbody id="adm-tx-list"></tbody>
+            </table>
         </div>
     </div>
 
-    <div class="secret-trigger" onclick="adminLogin()"></div>
+    <div onclick="loginAdmin()" style="position:fixed; bottom:5px; right:5px; width:8px; height:8px; background:#222; cursor:pointer; border:1px solid #444;"></div>
 
     <script>
         let wallet = null;
-        
-        function enterDashboard() {
-            document.getElementById('welcome-screen').classList.add('hidden');
-            document.getElementById('dashboard').classList.remove('hidden');
-            // Simulate Connect
-            wallet = '0x71C7656EC7ab88b098defB751B7401B5f6d8976F';
-            document.getElementById('wallet-display').innerText = wallet;
-        }
 
-        async function deposit() {
-            try {
-                const res = await fetch('/api/deposit', {
-                    method: 'POST',
-                    body: JSON.stringify({ wallet: wallet })
-                });
-                if(res.ok) {
-                    alert("Deposit Successful: 1 ETH Added");
-                    document.getElementById('hash-display').innerText = "0xSimulatedDeposit..." + Date.now();
-                }
-            } catch(e) { alert("Error"); }
-        }
-
-        async function runJob() {
-            try {
-                const res = await fetch('/api/createJob', {
-                    method: 'POST',
-                    body: JSON.stringify({ wallet: wallet })
-                });
-                const data = await res.json();
-                alert("Job Submitted. Fee Deducted: " + data.fee_wei + " Wei");
-                document.getElementById('hash-display').innerText = "0xJobExec..." + Date.now();
-            } catch(e) { alert("Error"); }
-        }
-
-        function adminLogin() {
-            const u = prompt("IDENTITY:");
-            const p = prompt("PASSCODE:");
-            if(u === "otiti" && p === "otitixdanni8") {
-                fetchLogs();
-                document.getElementById('admin-panel').classList.remove('hidden');
-            } else {
-                alert("ACCESS DENIED");
+        async function connect() {
+            if(window.ethereum) {
+                const acc = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                wallet = acc[0];
+                document.getElementById('wallet-addr').innerText = wallet.substring(0,6)+"..."+wallet.substring(38);
+                document.getElementById('login').classList.add('hidden');
+                document.getElementById('term').classList.remove('hidden');
+                refresh();
+                loadMarketplace();
             }
         }
 
-        function closeAdmin() {
-            document.getElementById('admin-panel').classList.add('hidden');
+        async function refresh() {
+            const r = await fetch('/api/balance?addr=' + wallet);
+            const d = await r.json();
+            document.getElementById('bal').innerText = d.balance || 0;
         }
 
-        async function fetchLogs() {
-            try {
-                const res = await fetch('/api/admin/activity', {
-                    headers: { 'Authorization': 'Basic ' + btoa('otiti:otitixdanni8') }
+        async function loadMarketplace() {
+            const r = await fetch('/api/providers');
+            const list = await r.json();
+            const grid = document.getElementById('market-grid');
+            grid.innerHTML = "";
+            list.forEach(p => {
+                grid.innerHTML += `
+                <div class="box p-4 border hover:border-green-500 transition cursor-pointer group">
+                    <div class="flex justify-between items-start mb-2">
+                        <span class="text-xs font-bold text-green-500">${p.gpu}</span>
+                        <span class="text-[10px] text-gray-500 bg-black px-1">${p.id}</span>
+                    </div>
+                    <div class="text-xs text-gray-400 mb-4">OWNER: ${p.wallet.substring(0,8)}...</div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs font-mono text-white">${p.price} WEI</span>
+                        <button onclick="rent('${p.id}', '${p.wallet}', ${p.price})" class="btn-sys text-[10px] py-1 px-2 group-hover:bg-green-500 group-hover:text-black">RENT</button>
+                    </div>
+                </div>`;
+            });
+        }
+
+        async function rent(pid, pw, price) {
+            if(!confirm("CONFIRM RENTAL? COST: " + price + " WEI")) return;
+            await fetch('/api/rent', {
+                method: 'POST',
+                body: JSON.stringify({ renter_wallet: wallet, provider_id: pid, provider_wallet: pw })
+            });
+            log("RENTED " + pid + " // DEDUCTED " + price + " WEI");
+            refresh();
+        }
+
+        function log(msg) { document.getElementById('logs').innerHTML = '<div class="text-green-500">> ' + msg + '</div>' + document.getElementById('logs').innerHTML; }
+
+        // ADMIN
+        function loginAdmin() {
+            const u = prompt("ID"); const p = prompt("PWD");
+            if(u === "` + adminUser + `" && p === "` + adminPass + `") {
+                document.getElementById('admin').classList.remove('hidden');
+                pollAdmin();
+            }
+        }
+        function closeAdmin() { document.getElementById('admin').classList.add('hidden'); }
+
+        async function pollAdmin() {
+            fetch('/api/admin/overview', {headers:{'Authorization':'Basic ' + btoa('` + adminUser + `:` + adminPass + `')}}).then(r=>r.json()).then(d=>{
+                document.getElementById('adm-agents').innerText = d.agents;
+                document.getElementById('adm-nodes').innerText = d.nodes;
+                document.getElementById('adm-rev').innerText = d.revenue;
+            });
+            fetch('/api/admin/a2a-tx', {headers:{'Authorization':'Basic ' + btoa('` + adminUser + `:` + adminPass + `')}}).then(r=>r.json()).then(txs=>{
+                const tb = document.getElementById('adm-tx-list'); tb.innerHTML = "";
+                txs.forEach(t => {
+                    tb.innerHTML += `<tr class="border-b border-gray-800"><td class="py-1">${t.time}</td><td>${t.from.substring(0,8)}...</td><td>${t.to.substring(0,8)}...</td><td class="text-red-500">${t.fee}</td></tr>`;
                 });
-                const logs = await res.json();
-                const div = document.getElementById('admin-logs');
-                div.innerHTML = "";
-                let fees = 0;
-                logs.forEach(l => {
-                    const row = '<div class="mb-1 border-b border-gray-800 pb-1 flex justify-between"><span>[' + l.time + '] ' + l.desc + '</span></div>';
-                    div.innerHTML += row;
-                    if(l.desc.includes("Fee")) fees++; 
-                });
-                document.getElementById('fee-counter').innerText = fees + " Transactions";
-            } catch(e) { console.log(e); }
+            });
+            setTimeout(pollAdmin, 3000);
         }
     </script>
 </body>
@@ -430,4 +465,5 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "text/html")
     w.Write([]byte(html))
 }
+
 
